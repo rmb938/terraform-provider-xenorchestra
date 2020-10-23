@@ -637,32 +637,50 @@ func resourceVirtualMachineUpdate(ctx context.Context, d *schema.ResourceData, m
 		}
 	}
 
-	if d.HasChange("boot_disk.0.size") {
-		size := d.Get("boot_disk.0.size").(int) * 1024 * 1024 * 1024
+	o, n := d.GetChange("attached_disk")
+	vbds, err := vm.GetAttachedVBDs(c, ctx)
+	if err != nil {
+		return diag.Diagnostics{
+			{
+				Severity: diag.Error,
+				Summary:  "Error getting attached vbds for vm",
+				Detail:   err.Error(),
+			},
+		}
+	}
 
-		if currentStatus == "Running" {
-			if allowStoppingForUpdate == false {
-				return diag.Diagnostics{
-					{
-						Severity: diag.Error,
-						Summary:  "Cannot update boot disk when VM is running unless allow_stopping_for_update is set to true",
-					},
-				}
-			}
+	bootDiskChanged := d.HasChange("boot_disk.0.size")
+	attachDiskChanged := d.HasChange("attached_disk")
 
-			err := vm.Stop(c, ctx, !vm.PVDriversDetected)
-			if err != nil {
-				return diag.Diagnostics{
-					{
-						Severity: diag.Error,
-						Summary:  "Error stopping VM for boot disk resize",
-						Detail:   err.Error(),
-					},
-				}
+	// trying to change disks without pv drivers while running
+	// this requires a power off
+	if vm.PVDriversDetected == false && currentStatus == "Running" && (bootDiskChanged || attachDiskChanged) {
+
+		// can't change attached disks when running
+		if allowStoppingForUpdate == false {
+			return diag.Diagnostics{
+				{
+					Severity: diag.Error,
+					Summary:  "Cannot change attached disks when VM is running without PV drivers unless allow_stopping_for_update is set to true",
+				},
 			}
-			stoppedForUpdate = true
 		}
 
+		err := vm.Stop(c, ctx, !vm.PVDriversDetected)
+		if err != nil {
+			return diag.Diagnostics{
+				{
+					Severity: diag.Error,
+					Summary:  "Error stopping VM for boot disk resize",
+					Detail:   err.Error(),
+				},
+			}
+		}
+		stoppedForUpdate = true
+	}
+
+	if bootDiskChanged {
+		size := d.Get("boot_disk.0.size").(int) * 1024 * 1024 * 1024
 		bootVDI, err := vm.GetBootDisk(c, ctx)
 		if err != nil {
 			return diag.Diagnostics{
@@ -686,19 +704,7 @@ func resourceVirtualMachineUpdate(ctx context.Context, d *schema.ResourceData, m
 		}
 	}
 
-	if d.HasChange("attached_disk") {
-		o, n := d.GetChange("attached_disk")
-
-		vbds, err := vm.GetAttachedVBDs(c, ctx)
-		if err != nil {
-			return diag.Diagnostics{
-				{
-					Severity: diag.Error,
-					Summary:  "Error getting attached vbds for vm",
-					Detail:   err.Error(),
-				},
-			}
-		}
+	if attachDiskChanged {
 
 		// Keep track of disks currently in the instance. It's possible that there are fewer
 		// disks currently attached than there were at the time we ran terraform plan.
@@ -757,37 +763,8 @@ func resourceVirtualMachineUpdate(ctx context.Context, d *schema.ResourceData, m
 
 		// If a source is only in the old config, it should be detached.
 		// Detach the old disks.
-
-		// trying to attach disks without pv drivers while runnng
-		// this requires a power off
-		if stoppedForUpdate == false && (vm.PVDriversDetected == false && currentStatus == "Running" && len(oDisks) > 0) {
-
-			// can't detach disks when running
-			if allowStoppingForUpdate == false {
-				return diag.Diagnostics{
-					{
-						Severity: diag.Error,
-						Summary:  "Cannot detach disks when VM is running without PV drivers unless allow_stopping_for_update is set to true",
-					},
-				}
-			}
-
-			err := vm.Stop(c, ctx, !vm.PVDriversDetected)
-			if err != nil {
-				return diag.Diagnostics{
-					{
-						Severity: diag.Error,
-						Summary:  "Error stopping VM for boot disk resize",
-						Detail:   err.Error(),
-					},
-				}
-			}
-			stoppedForUpdate = true
-		}
-
 		for hash, vbd := range oDisks {
 			if _, ok := nDisks[hash]; !ok {
-
 				// if running we need to detach first
 				if stoppedForUpdate == false && currentStatus == "Running" {
 					err := vbd.Disconnect(c, ctx)
@@ -816,32 +793,6 @@ func resourceVirtualMachineUpdate(ctx context.Context, d *schema.ResourceData, m
 		}
 
 		// Attach the new disks
-
-		// trying to attach disk without pv drives while running
-		// this required a power off
-		if stoppedForUpdate == false && (vm.PVDriversDetected == false && currentStatus == "Running" && len(attach) > 0) {
-			if allowStoppingForUpdate == false {
-				return diag.Diagnostics{
-					{
-						Severity: diag.Error,
-						Summary:  "Cannot attach disks when VM is running without PV drivers unless allow_stopping_for_update is set to true",
-					},
-				}
-			}
-
-			err := vm.Stop(c, ctx, !vm.PVDriversDetected)
-			if err != nil {
-				return diag.Diagnostics{
-					{
-						Severity: diag.Error,
-						Summary:  "Error stopping VM for boot disk resize",
-						Detail:   err.Error(),
-					},
-				}
-			}
-			stoppedForUpdate = true
-		}
-
 		for _, diskMap := range attach {
 			vdiID := diskMap["disk_id"].(string)
 
@@ -867,10 +818,10 @@ func resourceVirtualMachineUpdate(ctx context.Context, d *schema.ResourceData, m
 				}
 			}
 		}
-
 	}
 
-	// TODO: change network interfaces (remove requires power off)
+	// TODO: change network interfaces (add/remove requires power off if no pv drivers)
+	//  remove requires disconnect first
 
 	desiredStatus := d.Get("desired_status")
 	if stoppedForUpdate && desiredStatus == "" {
