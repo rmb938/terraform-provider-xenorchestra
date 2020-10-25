@@ -3,7 +3,6 @@ package xo
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/customdiff"
@@ -105,7 +104,6 @@ func resourceVirtualMachine() *schema.Resource {
 					},
 				},
 			},
-			// TODO: can't remove network interface when vm is running
 			"network_interface": {
 				Type:     schema.TypeList,
 				Required: true,
@@ -117,7 +115,7 @@ func resourceVirtualMachine() *schema.Resource {
 							Computed: true,
 						},
 						"device": {
-							Type:     schema.TypeInt,
+							Type:     schema.TypeString,
 							Computed: true,
 						},
 						"network_id": {
@@ -564,22 +562,15 @@ func resourceVirtualMachineRead(ctx context.Context, d *schema.ResourceData, m i
 	}
 
 	for _, vif := range vifs {
-		device, err := strconv.ParseInt(vif.Device, 10, 64)
-		if err != nil {
-			return diag.Diagnostics{
-				{
-					Severity: diag.Error,
-					Summary:  fmt.Sprintf("Error parsing VIF (%s) device", vif.ID),
-					Detail:   err.Error(),
-				},
-			}
-		}
-		networkInterfaceList = append(networkInterfaceList, map[string]interface{}{
-			"attached":    vif.Attached,
-			"device":      device,
-			"network_id":  vif.NetworkID,
-			"mac_address": vif.MAC,
-		})
+		// vifs are listed backwards so reverse the append
+		networkInterfaceList = append([]map[string]interface{}{
+			{
+				"attached":    vif.Attached,
+				"device":      vif.Device,
+				"network_id":  vif.NetworkID,
+				"mac_address": vif.MAC,
+			},
+		}, networkInterfaceList...)
 	}
 
 	d.Set("network_interface", networkInterfaceList)
@@ -637,24 +628,13 @@ func resourceVirtualMachineUpdate(ctx context.Context, d *schema.ResourceData, m
 		}
 	}
 
-	o, n := d.GetChange("attached_disk")
-	vbds, err := vm.GetAttachedVBDs(c, ctx)
-	if err != nil {
-		return diag.Diagnostics{
-			{
-				Severity: diag.Error,
-				Summary:  "Error getting attached vbds for vm",
-				Detail:   err.Error(),
-			},
-		}
-	}
-
 	bootDiskChanged := d.HasChange("boot_disk.0.size")
 	attachDiskChanged := d.HasChange("attached_disk")
+	networkChanged := d.HasChange("network_interface")
 
 	// trying to change disks without pv drivers while running
 	// this requires a power off
-	if vm.PVDriversDetected == false && currentStatus == "Running" && (bootDiskChanged || attachDiskChanged) {
+	if vm.PVDriversDetected == false && currentStatus == "Running" && (bootDiskChanged || attachDiskChanged || networkChanged) {
 
 		// can't change attached disks when running
 		if allowStoppingForUpdate == false {
@@ -705,6 +685,17 @@ func resourceVirtualMachineUpdate(ctx context.Context, d *schema.ResourceData, m
 	}
 
 	if attachDiskChanged {
+		o, n := d.GetChange("attached_disk")
+		vbds, err := vm.GetAttachedVBDs(c, ctx)
+		if err != nil {
+			return diag.Diagnostics{
+				{
+					Severity: diag.Error,
+					Summary:  "Error getting attached vbds for vm",
+					Detail:   err.Error(),
+				},
+			}
+		}
 
 		// Keep track of disks currently in the instance. It's possible that there are fewer
 		// disks currently attached than there were at the time we ran terraform plan.
@@ -820,8 +811,121 @@ func resourceVirtualMachineUpdate(ctx context.Context, d *schema.ResourceData, m
 		}
 	}
 
-	// TODO: change network interfaces (add/remove requires power off if no pv drivers)
-	//  remove requires disconnect first
+	if networkChanged {
+		o, n := d.GetChange("network_interface")
+		vifs, err := vm.GetVIFs(c, ctx)
+		if err != nil {
+			return diag.Diagnostics{
+				{
+					Severity: diag.Error,
+					Summary:  "Error getting attached vifs for vm",
+					Detail:   err.Error(),
+				},
+			}
+		}
+
+		currVIFs := map[string]xo_client.VIF{}
+		for _, vif := range vifs {
+			currVIFs[vif.Device] = vif
+		}
+
+		oVIFs := map[uint64]xo_client.VIF{}
+		for _, vif := range o.([]interface{}) {
+			vifMap := vif.(map[string]interface{})
+			position := vifMap["device"].(string)
+			hash, err := hashstructure.Hash(vifMap, nil)
+			if err != nil {
+				return diag.Diagnostics{
+					{
+						Severity: diag.Error,
+						Summary:  "Error hashing vif",
+						Detail:   err.Error(),
+					},
+				}
+			}
+
+			if vif, ok := currVIFs[position]; ok {
+				oVIFs[hash] = vif
+			}
+		}
+
+		nVIFs := map[uint64]struct{}{}
+		var attach []map[string]interface{}
+		for _, vif := range n.([]interface{}) {
+			vifMap := vif.(map[string]interface{})
+			hash, err := hashstructure.Hash(vifMap, nil)
+			if err != nil {
+				return diag.Diagnostics{
+					{
+						Severity: diag.Error,
+						Summary:  "Error hashing disk",
+						Detail:   err.Error(),
+					},
+				}
+			}
+			nVIFs[hash] = struct{}{}
+
+			if _, ok := oVIFs[hash]; !ok {
+				attach = append(attach, vifMap)
+			}
+		}
+
+		for hash, vif := range oVIFs {
+			if _, ok := nVIFs[hash]; !ok {
+				// if running we need to detach first
+				if stoppedForUpdate == false && currentStatus == "Running" && vif.Attached {
+					err := vif.Disconnect(c, ctx)
+					if err != nil {
+						return diag.Diagnostics{
+							{
+								Severity: diag.Error,
+								Summary:  fmt.Sprintf("Error disconnecting vif %s", vif.ID),
+								Detail:   err.Error(),
+							},
+						}
+					}
+				}
+
+				err := vif.Delete(c, ctx)
+				if err != nil {
+					return diag.Diagnostics{
+						{
+							Severity: diag.Error,
+							Summary:  fmt.Sprintf("Error deleting vif %s", vif.ID),
+							Detail:   err.Error(),
+						},
+					}
+				}
+			}
+		}
+
+		for _, vifMap := range attach {
+			networkID := vifMap["network_id"].(string)
+
+			network, err := c.GetNetworkByID(ctx, networkID)
+			if err != nil {
+				return diag.Diagnostics{
+					{
+						Severity: diag.Error,
+						Summary:  fmt.Sprintf("Error finding network with ID %s", network),
+						Detail:   err.Error(),
+					},
+				}
+			}
+
+			err = vm.AttachNetwork(c, ctx, network)
+			if err != nil {
+				return diag.Diagnostics{
+					{
+						Severity: diag.Error,
+						Summary:  fmt.Sprintf("Error creating VIF with network %s", network),
+						Detail:   err.Error(),
+					},
+				}
+			}
+		}
+
+	}
 
 	desiredStatus := d.Get("desired_status")
 	if stoppedForUpdate && desiredStatus == "" {

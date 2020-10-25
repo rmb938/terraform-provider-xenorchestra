@@ -257,3 +257,12 @@ func (vm *VirtualMachine) Start(client *Client, ctx context.Context) error {
 
 	return client.rpcConn.Call(ctx, "vm.start", params, nil)
 }
+
+func (vm *VirtualMachine) AttachNetwork(client *Client, ctx context.Context, network *Network) error {
+	params := map[string]interface{}{
+		"vm":      vm.ID,
+		"network": network.ID,
+	}
+
+	return client.rpcConn.Call(ctx, "vm.createInterface", params, nil)
+}

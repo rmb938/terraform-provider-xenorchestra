@@ -30,3 +30,19 @@ func (c *Client) GetVIFByID(ctx context.Context, id string) (*VIF, error) {
 	VIF := interf.(VIF)
 	return &VIF, nil
 }
+
+func (vif *VIF) Delete(client *Client, ctx context.Context) error {
+	params := map[string]interface{}{
+		"id": vif.ID,
+	}
+
+	return client.rpcConn.Call(ctx, "vif.delete", params, nil)
+}
+
+func (vif *VIF) Disconnect(client *Client, ctx context.Context) error {
+	params := map[string]interface{}{
+		"id": vif.ID,
+	}
+
+	return client.rpcConn.Call(ctx, "vif.disconnect", params, nil)
+}
