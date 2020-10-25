@@ -9,9 +9,9 @@ import (
 	"github.com/rmb938/terraform-provider-xenorchestra/xo_client"
 )
 
-func dataSourceStorageRepository() *schema.Resource {
+func dataSourceNetwork() *schema.Resource {
 	return &schema.Resource{
-		ReadContext: dataSourceStorageRepositoryRead,
+		ReadContext: dataSourceNetworkRead,
 		Schema: map[string]*schema.Schema{
 			"pool_id": {
 				Type:     schema.TypeString,
@@ -29,12 +29,12 @@ func dataSourceStorageRepository() *schema.Resource {
 	}
 }
 
-func dataSourceStorageRepositoryRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+func dataSourceNetworkRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	c := m.(*xo_client.Client)
 
 	poolID := d.Get("pool_id").(string)
 	name := d.Get("name").(string)
-	sr, err := c.GetStorageRepositoryByName(ctx, poolID, name)
+	network, err := c.GetNetworkByName(ctx, poolID, name)
 	if err != nil {
 		return diag.Diagnostics{
 			{
@@ -45,8 +45,8 @@ func dataSourceStorageRepositoryRead(ctx context.Context, d *schema.ResourceData
 		}
 	}
 
-	d.SetId(sr.ID)
-	d.Set("description", sr.Description)
+	d.SetId(network.ID)
+	d.Set("description", network.Description)
 
 	return nil
 }

@@ -39,6 +39,7 @@ func Provider() *schema.Provider {
 			"xenorchestra_template":           dataSourceTemplate(),
 			"xenorchestra_disk":               dataSourceDisk(),
 			"xenorchestra_storage_repository": dataSourceStorageRepository(),
+			"xenorchestra_network":            dataSourceNetwork(),
 		},
 		ConfigureContextFunc: providerConfigure,
 	}

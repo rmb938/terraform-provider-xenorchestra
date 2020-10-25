@@ -34,7 +34,7 @@ func dataSourceDiskRead(ctx context.Context, d *schema.ResourceData, m interface
 
 	storageRepositoryID := d.Get("storage_repository_id").(string)
 	name := d.Get("name").(string)
-	template, err := c.GetVDIByName(ctx, storageRepositoryID, name)
+	vdi, err := c.GetVDIByName(ctx, storageRepositoryID, name)
 	if err != nil {
 		return diag.Diagnostics{
 			{
@@ -45,8 +45,8 @@ func dataSourceDiskRead(ctx context.Context, d *schema.ResourceData, m interface
 		}
 	}
 
-	d.SetId(template.ID)
-	d.Set("description", template.Description)
+	d.SetId(vdi.ID)
+	d.Set("description", vdi.Description)
 
 	return nil
 }
